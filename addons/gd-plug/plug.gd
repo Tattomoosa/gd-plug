@@ -5,10 +5,11 @@ signal updated(plugin)
 
 const VERSION = "0.2.6"
 const DEFAULT_PLUGIN_URL = "https://git::@github.com/%s.git"
-const DEFAULT_PLUG_DIR = "res://.plugged"
-const DEFAULT_CONFIG_PATH = DEFAULT_PLUG_DIR + "/index.cfg"
+const DEFAULT_PLUGGED_DIR_PATH = ""
+const DEFAULT_CONFIG_FILENAME = "/index.cfg"
 const DEFAULT_USER_PLUG_SCRIPT_PATH = "res://plug.gd"
 const DEFAULT_BASE_PLUG_SCRIPT_PATH = "res://addons/gd-plug/plug.gd"
+const PLUGGED_DIR_NAME = ".plugged"
 
 const ENV_PRODUCTION = "production"
 const ENV_TEST = "test"
@@ -30,6 +31,9 @@ var _mutex = Mutex.new()
 var _start_time = 0
 var threadpool = _ThreadPool.new(logger)
 
+var plugged_path = DEFAULT_PLUGGED_DIR_PATH
+var _plugged_dir
+var _config_path
 
 func _init():
 	threadpool.connect("all_thread_finished", request_quit)
@@ -183,6 +187,9 @@ func _finalize():
 func _on_updated(plugin):
 	pass
 
+func _config():
+	pass
+
 func _plugging():
 	pass
 
@@ -196,10 +203,20 @@ func request_quit(exit_code=-1):
 # Index installed plugins, or create directory "plugged" if not exists
 func _plug_start():
 	logger.debug("Plug start")
-	if not project_dir.dir_exists(DEFAULT_PLUG_DIR):
-		if project_dir.make_dir(ProjectSettings.globalize_path(DEFAULT_PLUG_DIR)) == OK:
-			logger.debug("Make dir %s for plugin installation")
-	if installation_config.load(DEFAULT_CONFIG_PATH) == OK:
+	_config()
+	if !plugged_path.ends_with("/") and !plugged_path.is_empty():
+		plugged_path = plugged_path + "/"
+	if plugged_path.begins_with("/"):
+		logger.warn("Absolute paths for gd-plug directory are not recommended")
+	else:
+		plugged_path = "res://" + plugged_path
+	_plugged_dir = plugged_path + PLUGGED_DIR_NAME
+	_config_path = _plugged_dir + DEFAULT_CONFIG_FILENAME
+	logger.debug("Plugged directory: " + _plugged_dir)
+	if not project_dir.dir_exists(_plugged_dir):
+		if project_dir.make_dir(ProjectSettings.globalize_path(_plugged_dir)) == OK:
+			logger.debug("Make dir %s for plugin installation" % _plugged_dir)
+	if installation_config.load(_config_path) == OK:
 		logger.debug("Installation config loaded")
 	else:
 		logger.debug("Installation config not found")
@@ -211,7 +228,7 @@ func _plug_end():
 	var test = !OS.get_environment(ENV_TEST).is_empty()
 	if not test:
 		installation_config.set_value("plugin", "installed", _installed_plugins)
-		if installation_config.save(DEFAULT_CONFIG_PATH) == OK:
+		if installation_config.save(_config_path) == OK:
 			logger.debug("Plugged config saved")
 		else:
 			logger.error("Failed to save plugged config")
@@ -276,7 +293,7 @@ func _plug_clean():
 	assert(_installed_plugins != null, MSG_PLUG_START_ASSERTION)
 	threadpool.active = false
 	logger.info("Cleaning...")
-	var plugged_dir = DirAccess.open(DEFAULT_PLUG_DIR)
+	var plugged_dir = DirAccess.open(_plugged_dir)
 	plugged_dir.include_hidden = true
 	plugged_dir.list_dir_begin() # TODOGODOT4 fill missing arguments https://github.com/godotengine/godot/pull/40547
 	var file = plugged_dir.get_next()
@@ -304,7 +321,7 @@ func _plug_upgrade():
 		threadpool.active = false
 		logger.debug("All installation finished! Ready to uninstall removed plugins...")
 	threadpool.connect("all_thread_finished", request_quit)
-	threadpool.enqueue_task(directory_delete_recursively.bind(gd_plug.plug_dir))
+	threadpool.enqueue_task(directory_delete_recursively.bind(gd_plug.plugged_dir))
 	threadpool.active = true
 
 func _plug_status():
@@ -341,7 +358,7 @@ func _plug_status():
 		logger.info("\nUnplugged %d plugin%s" % [removed_plugins.size(), "s" if removed_plugins.size() > 1 else ""])
 		for plugin in removed_plugins:
 			logger.info("- %s removed" % plugin.name)
-	var plug_directory = DirAccess.open(DEFAULT_PLUG_DIR)
+	var plug_directory = DirAccess.open(_plugged_dir)
 	var orphan_dirs = []
 	if plug_directory.get_open_error() == OK:
 		plug_directory.list_dir_begin() # TODOGODOT4 fill missing arguments https://github.com/godotengine/godot/pull/40547
@@ -353,7 +370,7 @@ func _plug_status():
 			file = plug_directory.get_next()
 		plug_directory.list_dir_end()
 	if orphan_dirs:
-		logger.info("\nOrphan directory, %d found in %s, execute \"clean\" command to remove" % [orphan_dirs.size(), DEFAULT_PLUG_DIR])
+		logger.info("\nOrphan directory, %d found in %s, execute \"clean\" command to remove" % [orphan_dirs.size(), _plugged_dir])
 		for dir in orphan_dirs:
 			logger.info("- %s" % dir)
 	threadpool.active = true
@@ -378,7 +395,7 @@ func plug(repo, args={}):
 		plugin.url = DEFAULT_PLUGIN_URL % repo
 	else:
 		logger.error("Invalid repo: %s" % repo)
-	plugin.plug_dir = DEFAULT_PLUG_DIR + "/" + plugin.name
+	plugin.plugged_dir = _plugged_dir + "/" + plugin.name
 
 	var is_valid = true
 	plugin.include = args.get("include", [])
@@ -429,14 +446,14 @@ func uninstall_plugin(plugin):
 	var test = !OS.get_environment(ENV_TEST).is_empty()
 	logger.info("Uninstalling plugin %s..." % plugin.name)
 	uninstall(plugin)
-	directory_delete_recursively(plugin.plug_dir, {"exclude": [DEFAULT_CONFIG_PATH], "test": test})
+	directory_delete_recursively(plugin.plugged_dir, {"exclude": [_config_path], "test": test})
 
 func update_plugin(plugin, checking=false):
 	if not (plugin.name in _installed_plugins):
 		logger.info("%s new plugin" % plugin.name)
 		return true
 
-	var git = _GitExecutable.new(ProjectSettings.globalize_path(plugin.plug_dir), logger)
+	var git = _GitExecutable.new(ProjectSettings.globalize_path(plugin.plugged_dir), logger)
 	var installed_plugin = get_installed_plugin(plugin.name)
 	var changes = compare_plugins(plugin, installed_plugin)
 	var should_clone = false
@@ -472,7 +489,7 @@ func update_plugin(plugin, checking=false):
 			logger.info("%s cloning from %s..." % [plugin.name, plugin.url])
 			var test = !OS.get_environment(ENV_TEST).is_empty()
 			uninstall(get_installed_plugin(plugin.name))
-			directory_delete_recursively(plugin.plug_dir, {"exclude": [DEFAULT_CONFIG_PATH], "test": test})
+			directory_delete_recursively(plugin.plugged_dir, {"exclude": [_config_path], "test": test})
 			if download(plugin) == OK:
 				install(plugin)
 		elif should_pull:
@@ -491,18 +508,20 @@ func check_plugin(plugin):
 func download(plugin):
 	logger.info("Downloading %s from %s..." % [plugin.name, plugin.url])
 	var test = !OS.get_environment(ENV_TEST).is_empty()
-	var global_dest_dir = ProjectSettings.globalize_path(plugin.plug_dir)
-	if project_dir.dir_exists(plugin.plug_dir):
-		directory_delete_recursively(plugin.plug_dir)
-	project_dir.make_dir(plugin.plug_dir)
+	var global_dest_dir = ProjectSettings.globalize_path(plugin.plugged_dir)
+	if project_dir.dir_exists(plugin.plugged_dir):
+		push_warning(plugin.plugged_dir)
+		directory_delete_recursively(plugin.plugged_dir)
+	project_dir.make_dir(plugin.plugged_dir)
 	var result = _GitExecutable.new(global_dest_dir, logger).clone(plugin.url, global_dest_dir, {"branch": plugin.branch, "tag": plugin.tag, "commit": plugin.commit})
 	if result.exit == OK:
 		logger.info("Successfully download %s" % [plugin.name])
 	else:
 		logger.info("Failed to download %s" % plugin.name)
-		# Make sure plug_dir is clean when failed
-		directory_delete_recursively(plugin.plug_dir, {"exclude": [DEFAULT_CONFIG_PATH], "test": test})
-	project_dir.remove(plugin.plug_dir) # Remove empty directory
+		push_warning(plugin.plugged_dir)
+		# Make sure plugged_dir is clean when failed
+		directory_delete_recursively(plugin.plugged_dir, {"exclude": [_config_path], "test": test})
+	project_dir.remove(plugin.plugged_dir) # Remove empty directory
 	return result.exit
 
 func install(plugin):
@@ -511,7 +530,7 @@ func install(plugin):
 		include = ["addons/"]
 	if OS.get_environment(ENV_FORCE).is_empty() and OS.get_environment(ENV_TEST).is_empty():
 		var is_exists = false
-		var dest_files = directory_copy_recursively(plugin.plug_dir, "res://" + plugin.install_root, {"include": include, "exclude": plugin.exclude, "test": true, "silent_test": true})
+		var dest_files = directory_copy_recursively(plugin.plugged_dir, "res://" + plugin.install_root, {"include": include, "exclude": plugin.exclude, "test": true, "silent_test": true})
 		for dest_file in dest_files:
 			if project_dir.file_exists(dest_file):
 				logger.warn("%s attempting to overwrite file %s" % [plugin.name, dest_file])
@@ -522,7 +541,7 @@ func install(plugin):
 
 	logger.info("Installing files for %s..." % plugin.name)
 	var test = !OS.get_environment(ENV_TEST).is_empty()
-	var dest_files = directory_copy_recursively(plugin.plug_dir, "res://" + plugin.install_root, {"include": include, "exclude": plugin.exclude, "test": test})
+	var dest_files = directory_copy_recursively(plugin.plugged_dir, "res://" + plugin.install_root, {"include": include, "exclude": plugin.exclude, "test": test})
 	plugin.dest_files = dest_files
 	logger.info("Installed %d file%s for %s" % [dest_files.size(), "s" if dest_files.size() > 1 else "", plugin.name])
 	if plugin.name != "gd-plug":
@@ -546,10 +565,10 @@ func uninstall(plugin):
 	remove_installed_plugin(plugin.name)
 
 func is_plugin_downloaded(plugin):
-	if not project_dir.dir_exists(plugin.plug_dir + "/.git"):
+	if not project_dir.dir_exists(plugin.plugged_dir + "/.git"):
 		return
 
-	var git = _GitExecutable.new(ProjectSettings.globalize_path(plugin.plug_dir), logger)
+	var git = _GitExecutable.new(ProjectSettings.globalize_path(plugin.plugged_dir), logger)
 	return git.is_up_to_date(plugin)
 
 # Get installed plugin, thread safe
@@ -622,6 +641,7 @@ func directory_delete_recursively(dir_path, args={}):
 	var test = args.get("test", false)
 	var silent_test = args.get("silent_test", false)
 	var dir = DirAccess.open(dir_path)
+	push_warning(dir_path)
 	dir.include_hidden = true
 	if dir.get_open_error() == OK:
 		dir.list_dir_begin() # TODOGODOT4 fill missing arguments https://github.com/godotengine/godot/pull/40547
@@ -1057,7 +1077,7 @@ class _Logger extends RefCounted:
 	const DEFAULT_LOG_FORMAT_DETAIL = "[{time}] [{level}] {msg}"
 	const DEFAULT_LOG_FORMAT_NORMAL = "{msg}"
 	
-	var log_level = LogLevel.INFO
+	var log_level = LogLevel.DEBUG
 	var log_format = DEFAULT_LOG_FORMAT_NORMAL
 	var log_time_format = "{year}/{month}/{day} {hour}:{minute}:{second}"
 	var indent_level = 0
